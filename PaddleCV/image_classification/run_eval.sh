@@ -15,7 +15,8 @@ precision=int16
 
 batch_size=1
 
-n_iters=10
+n_iters=0 # 0 means run all pictures
+#n_iters=10
 
 place=xpu
 #place=cpu
@@ -30,5 +31,5 @@ python eval.py \
     --run_mode=$run_mode \
     --model=$model \
     --precision=$precision \
-    --data_dir=/chenrong06/ILSVRC2012/ \
-    --pretrained_model=/chenrong06/pretraind_models/$model\_pretrained
+    --data_dir=/ILSVRC2012/ \
+    --pretrained_model=/pretraind_models/$model\_pretrained

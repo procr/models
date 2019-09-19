@@ -179,7 +179,7 @@ def eval(args):
         sys.stdout.flush()
 
         n_iters += 1
-        if (n_iters >= args.n_iters):
+        if (args.n_iters > 0 and n_iters >= args.n_iters):
             exit()
 
 
