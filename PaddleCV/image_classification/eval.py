@@ -41,11 +41,15 @@ add_arg('image_shape',      str,  "3,224,224",          "Input image size")
 parser.add_argument("--pretrained_model", default=None, required=True, type=str, help="The path to load pretrained model")
 add_arg('model',            str,  "ResNet50", "Set the network to use.")
 add_arg('resize_short_size', int, 256,                  "Set resize short size")
-add_arg('reader_thread',    int,  8,                    "The number of multi thread reader")
+add_arg('reader_thread',    int,  1,                    "The number of multi thread reader")
 add_arg('reader_buf_size',  int,  2048,                 "The buf size of multi thread reader")
 parser.add_argument('--image_mean', nargs='+', type=float, default=[0.485, 0.456, 0.406], help="The mean of input image data")
 parser.add_argument('--image_std', nargs='+', type=float, default=[0.229, 0.224, 0.225], help="The std of input image data")
 add_arg('crop_size',        int,  224,                  "The value of crop size")
+add_arg('precision',        str,   "int16", "int16, int8")
+add_arg('n_iters',          int,   1, "rounds")
+add_arg('run_mode',         str,   "fused_infer", "infer, fused_infer.")
+add_arg('place',            str,   "xpu", "xpu, cpu.")
 # yapf: enable
 
 
@@ -66,7 +70,7 @@ def eval(args):
     # model definition
     model = models.__dict__[args.model]()
 
-    if args.model == "GoogLeNet":
+    if False and args.model == "GoogLeNet":
         out0, out1, out2 = model.net(input=image, class_dim=args.class_dim)
         cost0 = fluid.layers.cross_entropy(input=out0, label=label)
         cost1 = fluid.layers.cross_entropy(input=out1, label=label)
@@ -80,9 +84,12 @@ def eval(args):
         acc_top5 = fluid.layers.accuracy(input=out0, label=label, k=5)
     else:
         out = model.net(input=image, class_dim=args.class_dim)
-
         cost, pred = fluid.layers.softmax_with_cross_entropy(
             out, label, return_softmax=True)
+
+        #pred = fluid.layers.softmax(out)
+        #cost = fluid.layers.cross_entropy(input=out, label=label)
+
         avg_cost = fluid.layers.mean(x=cost)
         acc_top1 = fluid.layers.accuracy(input=pred, label=label, k=1)
         acc_top5 = fluid.layers.accuracy(input=pred, label=label, k=5)
@@ -91,11 +98,48 @@ def eval(args):
 
     fetch_list = [avg_cost.name, acc_top1.name, acc_top5.name]
 
-    place = fluid.CUDAPlace(0) if args.use_gpu else fluid.CPUPlace()
+    #place = fluid.CUDAPlace(0) if args.use_gpu else fluid.CPUPlace()
+    if (args.place == "xpu"):
+        place = fluid.XPUPlace(0)
+    else:
+        place = fluid.CPUPlace()
     exe = fluid.Executor(place)
     exe.run(fluid.default_startup_program())
 
     fluid.io.load_persistables(exe, args.pretrained_model)
+    #fluid.io.save_inference_model(
+    #    dirname=args.model,
+    #    feeded_var_names=['image'],
+    #    main_program=test_program,
+    #    target_vars=out,
+    #    executor=exe,
+    #    model_filename='__model__',
+    #    params_filename='__params__')
+    #print("model: ", args.model, " is already saved")
+    #exit(0)
+
+    #print("-------------------------------------")
+    #for block in test_program.blocks:
+    #    i = 0
+    #    for op in block.ops:
+    #        print("[{}]: {}".format(i, op.type))
+    #        i += 1
+    #exit()
+
+    if (args.place == "xpu" and args.run_mode == "fused_infer"):
+        print("Transpiling...")
+        t = fluid.transpiler.InferenceXPUTranspiler()
+        config = {
+                "use_fake_max": False,
+                "conv_weight_type": args.precision,
+                "fc_weight_type": args.precision,
+                "fc_pretrans_a": False,
+                "fc_pretrans_b": True,
+                "batch_size": args.batch_size
+                }
+        t.transpile_xpu(test_program, place, config)
+
+    print("Inferencing...")
 
     val_reader = paddle.batch(
         reader.val(settings=args), batch_size=args.batch_size)
@@ -103,7 +147,11 @@ def eval(args):
 
     test_info = [[], [], []]
     cnt = 0
+    n_iters = 0
     for batch_id, data in enumerate(val_reader()):
+        label = [m[1] for m in data]
+        data_mean = [np.mean(m[0]) for m in data]
+
         t1 = time.time()
         loss, acc1, acc5 = exe.run(test_program,
                                    fetch_list=fetch_list,
@@ -117,20 +165,22 @@ def eval(args):
         test_info[1].append(acc1 * len(data))
         test_info[2].append(acc5 * len(data))
         cnt += len(data)
-        if batch_id % 10 == 0:
-            print("Testbatch {0},loss {1}, "
-                  "acc1 {2},acc5 {3},time {4}".format(batch_id, \
-                  "%.5f"%loss,"%.5f"%acc1, "%.5f"%acc5, \
-                  "%2.2f sec" % period))
-            sys.stdout.flush()
+        test_loss = np.sum(test_info[0]) / cnt
+        test_acc1 = np.sum(test_info[1]) / cnt
+        test_acc5 = np.sum(test_info[2]) / cnt
 
-    test_loss = np.sum(test_info[0]) / cnt
-    test_acc1 = np.sum(test_info[1]) / cnt
-    test_acc5 = np.sum(test_info[2]) / cnt
+        print("label {0}, data_mean {1}".format(label, data_mean))
+        print("Testbatch {0},loss {1}, "
+                "acc1 {2},acc5 {3},time {4}".format(batch_id, \
+                "%.5f"%loss,"%.5f"%acc1, "%.5f"%acc5, \
+                "%2.2f sec" % period))
+        print("Test_loss {0}, test_acc1 {1}, test_acc5 {2}\n".format(
+            "%.5f" % test_loss, "%.5f" % test_acc1, "%.5f" % test_acc5))
+        sys.stdout.flush()
 
-    print("Test_loss {0}, test_acc1 {1}, test_acc5 {2}".format(
-        "%.5f" % test_loss, "%.5f" % test_acc1, "%.5f" % test_acc5))
-    sys.stdout.flush()
+        n_iters += 1
+        if (n_iters >= args.n_iters):
+            exit()
 
 
 def main():

@@ -127,7 +127,7 @@ def train(args):
     train_reader = reader.train(settings=args)
     train_reader = paddle.batch(
         train_reader,
-        batch_size=int(args.batch_size / fluid.core.get_cuda_device_count()),
+        batch_size=int(args.batch_size / 1),
         drop_last=True)
 
     test_reader = reader.val(settings=args)
